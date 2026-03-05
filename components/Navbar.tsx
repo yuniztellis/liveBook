@@ -17,7 +17,7 @@ const Navbar = () => {
   const {user} = useUser();
 
   return (
-    <header className="fixed z-50 w-full bg-[var(--bg-primary)]">
+    <header className="fixed z-50 w-full bg-(--bg-primary)">
       <div className="wrapper navbar-height flex items-center justify-between py-4">
         <Link href="/" className="flex items-center gap-0.5">
           <Image src="/assets/logo.png" alt="LiveBook" width={70} height={45} />

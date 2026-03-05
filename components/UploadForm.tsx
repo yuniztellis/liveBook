@@ -5,39 +5,46 @@ import { ImageUp, Upload, X } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 
+
 import LoadingOverlay from '@/components/LoadingOverlay'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import {useAuth} from "@clerk/nextjs";
+import { toast } from "sonner";
+import {checkBookExists, createBook, saveBookSegments} from "@/lib/actions/book.actions";
+import {useRouter} from "next/navigation";
+import {parsePDFFile} from "@/lib/utils";
+import {upload} from "@vercel/blob/client";
 
 const MAX_PDF_BYTES = 50 * 1024 * 1024
 
+
 const voiceGroups = {
   male: [
-    { key: 'dave', name: 'David', description: 'Masculina jovem, sotaque britanico-essex, casual e conversacional' },
-    { key: 'daniel', name: 'Daniel', description: 'Masculina de meia-idade, britanica, autoritaria mas calorosa' },
-    { key: 'chris', name: 'Cristovão', description: 'Masculina, casual e descontraida' },
+    { key: 'David', name: 'David', description: 'Masculina jovem, sotaque britanico-essex, casual e conversacional' },
+    { key: 'Daniel', name: 'Daniel', description: 'Masculina de meia-idade, britanica, autoritaria mas calorosa' },
+    { key: 'Cristovão', name: 'Cristovão', description: 'Masculina, casual e descontraida' },
   ],
   female: [
-    { key: 'rachel', name: 'Joana', description: 'Feminina jovem, americana, calma e clara' },
-    { key: 'sarah', name: 'Maria', description: 'Feminina jovem, americana, suave e acessivel' },
+    { key: 'Joana', name: 'Joana', description: 'Feminina jovem, americana, calma e clara' },
+    { key: 'Maria', name: 'Maria', description: 'Feminina jovem, americana, suave e acessivel' },
   ],
 } as const
 
 const allVoiceKeys = [...voiceGroups.male, ...voiceGroups.female].map((voice) => voice.key)
 
 const formSchema = z.object({
-  pdfFile: z
-    .instanceof(File, { message: 'O ficheiro PDF e obrigatorio.' })
-    .refine((file) => file.type === 'application/pdf', 'O ficheiro tem de estar em formato PDF.')
-    .refine((file) => file.size <= MAX_PDF_BYTES, 'O PDF nao pode ultrapassar 50MB.'),
-  coverImage: z
-    .instanceof(File)
-    .refine((file) => file.type.startsWith('image/'), 'A capa tem de ser um ficheiro de imagem.')
-    .optional(),
+
   title: z.string().trim().min(2, 'O titulo e obrigatorio.'),
   author: z.string().trim().min(2, 'O nome do autor e obrigatorio.'),
   voice: z.enum(allVoiceKeys as [string, ...string[]], { message: 'Escolha uma voz para o assistente.' }),
+  pdfFile: z .instanceof(File, { message: 'O ficheiro PDF e obrigatorio.' })
+        .refine((file) => file.type === 'application/pdf', 'O ficheiro tem de estar em formato PDF.')
+        .refine((file) => file.size <= MAX_PDF_BYTES, 'O PDF nao pode ultrapassar 50MB.'),
+    coverImage: z .instanceof(File)
+        .refine((file) => file.type.startsWith('image/'), 'A capa tem de ser um ficheiro de imagem.')
+        .optional(),
 })
 
 type FormValues = z.infer<typeof formSchema>
@@ -46,12 +53,15 @@ const UploadForm = () => {
   const pdfInputRef = React.useRef<HTMLInputElement | null>(null)
   const coverInputRef = React.useRef<HTMLInputElement | null>(null)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
+  const { userId } = useAuth();
+  const router = useRouter();
 
   const form = useForm<FormValues>({
     defaultValues: {
       title: '',
       author: '',
-      voice: 'rachel',
+      voice: '',
+      pdfFile: undefined,
       coverImage: undefined,
     },
     resolver: async (values) => {
@@ -81,14 +91,102 @@ const UploadForm = () => {
 
   const selectedPdf = form.watch('pdfFile')
 
-  const onSubmit = async (values: FormValues) => {
-    setIsSubmitting(true)
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 1200))
-      console.log('Formulario valido:', values)
-    } finally {
-      setIsSubmitting(false)
-    }
+  const onSubmit = async (data: FormValues) => {
+
+      if(!userId){
+        return toast.error('Por favor faça login pra poder fazer o upload do livro')
+      }
+
+      setIsSubmitting(true)
+
+      //Track User
+
+      try {
+          const existsCheck = await checkBookExists(data.title)
+        if(existsCheck.exists && existsCheck.book){
+            toast.info('Um livro com esse titulo ja existe')
+            form.reset()
+            router.push(`/books/${existsCheck.book.slug}`)
+            return;
+        }
+
+        const fileTitle = data.title.replace(/\s+/g, '-').toLowerCase()
+        const pdfFile = data.pdfFile;
+
+        const parsedPDF = await parsePDFFile(pdfFile);
+
+        if(parsedPDF.content.length == 0){
+            toast.error('Falha ao analisar o pdf. Por favor escolha outro Pdf')
+            return
+        }
+
+        const uploadedPdfBlob = await upload(fileTitle, pdfFile, {
+            access: 'public',
+            handleUploadUrl: '/api/upload',
+            contentType: 'application/pdf',
+        })
+
+          let coverUrl: string;
+          let coverBlobKey: string;
+
+          if(data.coverImage){
+              const coverFile = data.coverImage;
+              const uploadedCoverBlob = await upload(fileTitle, coverFile, {
+                  access: 'public',
+                  handleUploadUrl: '/api/upload',
+                  contentType: coverFile.type,
+              });
+              coverUrl = uploadedCoverBlob.url
+              coverBlobKey = uploadedCoverBlob.pathname
+          } else {
+              const response = await fetch(parsedPDF.cover)
+              const blob = await response.blob()
+
+              const uploadedCoverBlob = await upload(`${fileTitle}_cover.png`, blob, {
+                  access: 'public',
+                  handleUploadUrl: '/api/upload',
+                  contentType: blob.type || 'image/png',
+              });
+              coverUrl = uploadedCoverBlob.url;
+              coverBlobKey = uploadedCoverBlob.pathname;
+          }
+
+          const book = await createBook({
+              clerkId: userId,
+              title: data.title,
+              author: data.author,
+              persona: data.voice,
+              fileURL: uploadedPdfBlob.url,
+              fileBlobKey: uploadedPdfBlob.pathname,
+              coverURL: coverUrl,
+              coverBlobKey,
+              fileSize: pdfFile.size,
+          })
+
+          if(!book?.success) throw new Error('Falha ao criar o livro')
+
+          if(book.alreadyExists){
+              toast.info('Um livro com esse titulo ja existe')
+              form.reset()
+              router.push(`/books/${book.data.slug}`)
+              return;
+          }
+
+          const segments = await saveBookSegments(book.data._id, userId, parsedPDF.content);
+
+          if(!segments.success){
+              toast.error('Falha ao salvar o segmento')
+              throw new Error('Falha ao salvar o segmento')
+          }
+          form.reset()
+          router.push('/')
+      }catch (e) {
+        console.error(e)
+
+        toast.error('Falha ao fazer o upload do livro. Tente novamente.')
+      }finally {
+          setIsSubmitting(false)
+      }
   }
 
   return (
@@ -335,3 +433,4 @@ const UploadForm = () => {
 }
 
 export default UploadForm
+
